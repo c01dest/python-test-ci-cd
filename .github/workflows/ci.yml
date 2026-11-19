@@ -1,0 +1,95 @@
+﻿name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    name: Tests (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12"]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install project and test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e .
+          pip install "pytest==8.4.1" "werkzeug==3.1.3" asgiref python-dotenv
+
+      - name: Run tests
+        run: pytest tests/
+
+  build-and-run:
+    name: Build and run Flaskr
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build wheel and sdist
+        run: |
+          python -m pip install --upgrade pip build
+          python -m build --wheel --sdist --outdir dist/
+          ls -l dist/
+
+      - name: Create virtual environment and install wheel
+        run: |
+          python -m venv /tmp/venv
+          /tmp/venv/bin/pip install --upgrade pip
+          /tmp/venv/bin/pip install dist/*.whl
+          /tmp/venv/bin/flask --version
+
+      - name: Install Flaskr (keeping Flask from the wheel)
+        run: |
+          before=$(/tmp/venv/bin/pip show flask | awk '/^Version:/ {print $2}')
+          /tmp/venv/bin/pip install --no-deps examples/tutorial
+          after=$(/tmp/venv/bin/pip show flask | awk '/^Version:/ {print $2}')
+          echo "Flask before: $before, after: $after"
+          test "$before" = "$after"
+
+      - name: Initialize Flaskr database
+        run: /tmp/venv/bin/flask --app flaskr init-db
+
+      - name: Run Flaskr on port 5000
+        run: |
+          nohup /tmp/venv/bin/flask --app flaskr run --host 0.0.0.0 --port 5000 > /tmp/flaskr.log 2>&1 &
+          for i in $(seq 1 15); do
+            if curl -fsS http://127.0.0.1:5000/ > /dev/null; then
+              echo "Flaskr is up on port 5000"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "Flaskr did not start"
+          cat /tmp/flaskr.log
+          exit 1
+
+      - name: Show application log
+        if: always()
+        run: cat /tmp/flaskr.log || true
+
+      - name: Upload distributions
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
